@@ -625,7 +625,8 @@ testEndToEndWorkflow = script do
   logistics <- allocateParty "LogisTrans E2E"
   retailer <- allocateParty "ViniShop Oslo E2E"
 
-  setTime (time (date 2026 Oct 2) 0 0 0)
+  -- Read the current ledger time instead of changing it
+  currentTime <- getTime
 
   -- Step 1: Quinta do Vale creates the wine batch
   registryCid <- submit vineyard do
@@ -640,7 +641,7 @@ testEndToEndWorkflow = script do
         region = "Douro Valley"
         latitude = 41.162
         longitude = -7.790
-      harvestDate = time (date 2026 Sep 15) 0 0 0
+      harvestDate = addRelTime currentTime (days (-30))
       grapeVariety = "Touriga Nacional"
       bottleQR = "QR-NFC-88421"
 
