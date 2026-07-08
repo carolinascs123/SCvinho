@@ -7,4 +7,4 @@ dependencies:
   - daml-stdlib
   - daml-script
 data-dependencies:
-  - ../main/.daml/dist/porto-wine-traceability-main-0.0.1.dar
+ - ../contracts/.daml/dist/porto-wine-traceability-main-0.0.1.dar
