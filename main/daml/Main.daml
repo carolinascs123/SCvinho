@@ -1,0 +1,401 @@
+module Main where
+
+import qualified DA.Text as Text
+
+
+-- ============================================================
+-- DATA TYPES
+-- ============================================================
+
+-- Possible states in the lifecycle of a Port wine batch
+data BatchStatus
+  = PENDING
+  | CERTIFIED
+  | REJECTED
+  | RECALLED
+  deriving (Eq, Show)
+
+
+-- Geographic origin of the wine batch
+data Origin = Origin
+  with
+    region : Text
+    latitude : Decimal
+    longitude : Decimal
+  deriving (Eq, Show)
+
+
+-- Internal event recorded in the complete batch history
+data Event = Event
+  with
+    eventType : Text
+    description : Text
+    actor : Party
+    eventTime : Time
+  deriving (Eq, Show)
+
+
+-- High-level event safe to expose to the final consumer
+data PublicEvent = PublicEvent
+  with
+    eventType : Text
+    eventTime : Time
+  deriving (Eq, Show)
+
+
+-- Sanitized public view returned after scanning the bottle QR code
+data ProvenanceSummary = ProvenanceSummary
+  with
+    batchId : Text
+    bottleQR : Text
+    origin : Origin
+    harvestDate : Time
+    grapeVariety : Text
+    certificationStatus : BatchStatus
+    certificationHash : Optional Text
+    publicHistory : [PublicEvent]
+  deriving (Eq, Show)
+
+
+-- ============================================================
+-- HELPER FUNCTIONS
+-- ============================================================
+
+-- Validates the required batch ID format: PW-YYYY-NNNN
+validBatchId : Text -> Bool
+validBatchId value =
+  Text.length value == 12
+    && Text.isPrefixOf "PW-" value
+    && Text.substring 7 1 value == "-"
+    && Text.isDigit (Text.substring 3 4 value)
+    && Text.isDigit (Text.substring 8 4 value)
+
+
+-- Defines which events are safe to expose to the consumer
+isPublicEvent : Event -> Bool
+isPublicEvent event =
+  event.eventType == "CUSTODY_TRANSFER"
+    || event.eventType == "CERTIFICATION_REQUEST"
+    || event.eventType == "CERTIFIED"
+    || event.eventType == "CERTIFICATION_REJECTED"
+    || event.eventType == "RECALLED"
+
+
+-- Converts an internal event into a sanitized public event
+toPublicEvent : Event -> PublicEvent
+toPublicEvent event =
+  PublicEvent with
+    eventType = event.eventType
+    eventTime = event.eventTime
+
+
+-- ============================================================
+-- MAIN WINE BATCH CONTRACT
+-- ============================================================
+
+template WineBatch
+  with
+    batchId : Text
+    origin : Origin
+    harvestDate : Time
+    grapeVariety : Text
+    vineyard : Party
+    currentOwner : Party
+    ivdp : Party
+    history : [Event]
+    certificationHash : Optional Text
+    ipfsCid : Optional Text
+    status : BatchStatus
+    bottleQR : Text
+  where
+    signatory vineyard
+    observer currentOwner, ivdp
+
+    ensure
+      validBatchId batchId
+        && grapeVariety /= ""
+        && bottleQR /= ""
+
+
+    -- ========================================================
+    -- TRANSFER OF CUSTODY
+    -- ========================================================
+
+    choice TransferCustody : ContractId WineBatch
+      with
+        newOwner : Party
+        logisticsNote : Optional Text
+      controller currentOwner
+      do
+        currentTime <- getTime
+
+        assertMsg
+          "Cannot transfer custody of a recalled batch"
+          (status /= RECALLED)
+
+        assertMsg
+          "New owner must be different from current owner"
+          (newOwner /= currentOwner)
+
+        let eventDescription =
+              case logisticsNote of
+                None ->
+                  "Custody transferred to a new owner"
+
+                Some note ->
+                  note
+
+        let transferEvent =
+              Event with
+                eventType = "CUSTODY_TRANSFER"
+                description = eventDescription
+                actor = currentOwner
+                eventTime = currentTime
+
+        create this with
+          currentOwner = newOwner
+          history = history ++ [transferEvent]
+
+
+    -- ========================================================
+    -- PRODUCTION
+    -- ========================================================
+
+    choice RecordProductionEvent : ContractId WineBatch
+      with
+        productionDetails : Text
+      controller currentOwner
+      do
+        currentTime <- getTime
+
+        assertMsg
+          "Production can only be recorded while the batch is pending certification"
+          (status == PENDING)
+
+        assertMsg
+          "Production details cannot be empty"
+          (productionDetails /= "")
+
+        let productionEvent =
+              Event with
+                eventType = "PRODUCTION"
+                description = productionDetails
+                actor = currentOwner
+                eventTime = currentTime
+
+        create this with
+          history = history ++ [productionEvent]
+
+
+    -- ========================================================
+    -- CERTIFICATION REQUEST
+    -- ========================================================
+
+    choice RequestCertification : ContractId WineBatch
+      controller currentOwner
+      do
+        currentTime <- getTime
+
+        assertMsg
+          "Certification can only be requested for a pending batch"
+          (status == PENDING)
+
+        assertMsg
+          "Certification has already been requested"
+          (not
+            (any
+              (\event ->
+                event.eventType == "CERTIFICATION_REQUEST")
+              history))
+
+        let requestEvent =
+              Event with
+                eventType = "CERTIFICATION_REQUEST"
+                description = "Certification requested from the IVDP"
+                actor = currentOwner
+                eventTime = currentTime
+
+        create this with
+          history = history ++ [requestEvent]
+
+
+    -- ========================================================
+    -- CERTIFICATION APPROVAL
+    -- ========================================================
+
+    choice IssueCertification : ContractId WineBatch
+      with
+        newCertificationHash : Text
+        newIpfsCid : Text
+      controller ivdp
+      do
+        currentTime <- getTime
+
+        assertMsg
+          "Only a pending batch can be certified"
+          (status == PENDING)
+
+        assertMsg
+          "Certification must be requested before approval"
+          (any
+            (\event ->
+              event.eventType == "CERTIFICATION_REQUEST")
+            history)
+
+        assertMsg
+          "Certification hash cannot be empty"
+          (newCertificationHash /= "")
+
+        assertMsg
+          "IPFS CID cannot be empty"
+          (newIpfsCid /= "")
+
+        let certificationEvent =
+              Event with
+                eventType = "CERTIFIED"
+                description = "Port wine batch certified by the IVDP"
+                actor = ivdp
+                eventTime = currentTime
+
+        create this with
+          certificationHash = Some newCertificationHash
+          ipfsCid = Some newIpfsCid
+          status = CERTIFIED
+          history = history ++ [certificationEvent]
+
+
+    -- ========================================================
+    -- CERTIFICATION REJECTION
+    -- ========================================================
+
+    choice RejectCertification : ContractId WineBatch
+      with
+        rejectionReason : Text
+      controller ivdp
+      do
+        currentTime <- getTime
+
+        assertMsg
+          "Only a pending batch can be rejected"
+          (status == PENDING)
+
+        assertMsg
+          "Certification must be requested before rejection"
+          (any
+            (\event ->
+              event.eventType == "CERTIFICATION_REQUEST")
+            history)
+
+        assertMsg
+          "Rejection reason cannot be empty"
+          (rejectionReason /= "")
+
+        let rejectionEvent =
+              Event with
+                eventType = "CERTIFICATION_REJECTED"
+                description = rejectionReason
+                actor = ivdp
+                eventTime = currentTime
+
+        create this with
+          status = REJECTED
+          history = history ++ [rejectionEvent]
+
+
+    -- ========================================================
+    -- CONSUMER VERIFICATION
+    -- ========================================================
+
+    nonconsuming choice VerifyProvenance : ProvenanceSummary
+      with
+        scannedQR : Text
+      controller currentOwner
+      do
+        assertMsg
+          "QR code does not match this wine batch"
+          (scannedQR == bottleQR)
+
+        pure ProvenanceSummary with
+          batchId = batchId
+          bottleQR = bottleQR
+          origin = origin
+          harvestDate = harvestDate
+          grapeVariety = grapeVariety
+          certificationStatus = status
+          certificationHash = certificationHash
+          publicHistory =
+            map toPublicEvent
+              (filter isPublicEvent history)
+
+
+    -- ========================================================
+    -- RECALL
+    -- ========================================================
+
+    choice RecallBatch : ContractId WineBatch
+      with
+        recallReason : Text
+      controller ivdp
+      do
+        currentTime <- getTime
+
+        assertMsg
+          "Only a certified batch can be recalled"
+          (status == CERTIFIED)
+
+        assertMsg
+          "Recall reason cannot be empty"
+          (recallReason /= "")
+
+        let recallEvent =
+              Event with
+                eventType = "RECALLED"
+                description = recallReason
+                actor = ivdp
+                eventTime = currentTime
+
+        create this with
+          status = RECALLED
+          history = history ++ [recallEvent]
+
+
+-- ============================================================
+-- WINE BATCH REGISTRY
+-- ============================================================
+
+template WineBatchRegistry
+  with
+    vineyard : Party
+    ivdp : Party
+  where
+    signatory vineyard
+    observer ivdp
+
+    nonconsuming choice CreateWineBatch : ContractId WineBatch
+      with
+        batchId : Text
+        origin : Origin
+        harvestDate : Time
+        grapeVariety : Text
+        bottleQR : Text
+      controller vineyard
+      do
+        currentTime <- getTime
+
+        assertMsg
+          "Harvest date must be in the past"
+          (harvestDate < currentTime)
+
+        create WineBatch with
+          batchId = batchId
+          origin = origin
+          harvestDate = harvestDate
+          grapeVariety = grapeVariety
+          vineyard = vineyard
+          currentOwner = vineyard
+          ivdp = ivdp
+          history = []
+          certificationHash = None
+          ipfsCid = None
+          status = PENDING
+          bottleQR = bottleQR

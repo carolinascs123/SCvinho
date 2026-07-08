@@ -1,0 +1,9 @@
+/.daml
+/log
+
+# Daml build artifacts
+**/.daml/
+
+# macOS
+.DS_Store
+**/.DS_Store

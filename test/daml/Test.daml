@@ -1,0 +1,736 @@
+module Test where
+
+import Daml.Script
+import DA.Date
+import DA.Time
+import Main
+
+-- Test 1: create a valid Port wine batch with a past harvest date
+testCreateValidWineBatch : Script ()
+testCreateValidWineBatch = script do
+
+  vineyard <- allocateParty "Quinta do Vale"
+  ivdp <- allocateParty "IVDP"
+
+  setTime (time (date 2026 Oct 2) 0 0 0)
+
+  registryCid <- submit vineyard do
+    createCmd WineBatchRegistry with
+      vineyard = vineyard
+      ivdp = ivdp
+
+  _ <- submit vineyard do
+    exerciseCmd registryCid CreateWineBatch with
+      batchId = "PW-2026-0042"
+      origin = Origin with
+        region = "Douro Valley"
+        latitude = 41.162
+        longitude = -7.790
+      harvestDate = time (date 2026 Sep 15) 0 0 0
+      grapeVariety = "Touriga Nacional"
+      bottleQR = "QR-NFC-88421"
+
+  pure ()
+
+
+-- Test 2: reject a wine batch with an empty grape variety
+testRejectEmptyGrapeVariety : Script ()
+testRejectEmptyGrapeVariety = script do
+
+  vineyard <- allocateParty "Quinta do Vale Invalid Test"
+  ivdp <- allocateParty "IVDP Invalid Test"
+
+  currentTime <- getTime
+
+  submitMustFail vineyard do
+    createCmd WineBatch with
+      batchId = "PW-2026-0043"
+      origin = Origin with
+        region = "Douro Valley"
+        latitude = 41.162
+        longitude = -7.790
+      harvestDate = currentTime
+      grapeVariety = ""
+      vineyard = vineyard
+      currentOwner = vineyard
+      ivdp = ivdp
+      history = []
+      certificationHash = None
+      ipfsCid = None
+      status = PENDING
+      bottleQR = "QR-NFC-88422"
+
+
+-- Test 3: reject a wine batch with an invalid batch ID
+testRejectInvalidBatchId : Script ()
+testRejectInvalidBatchId = script do
+
+  vineyard <- allocateParty "Quinta Invalid Batch ID"
+  ivdp <- allocateParty "IVDP Invalid Batch ID"
+
+  currentTime <- getTime
+
+  submitMustFail vineyard do
+    createCmd WineBatch with
+      batchId = "XX-2026-0042"
+      origin = Origin with
+        region = "Douro Valley"
+        latitude = 41.162
+        longitude = -7.790
+      harvestDate = currentTime
+      grapeVariety = "Touriga Nacional"
+      vineyard = vineyard
+      currentOwner = vineyard
+      ivdp = ivdp
+      history = []
+      certificationHash = None
+      ipfsCid = None
+      status = PENDING
+      bottleQR = "QR-NFC-88423"
+
+
+-- Test 4: reject a wine batch with a future harvest date
+testRejectFutureHarvestDate : Script ()
+testRejectFutureHarvestDate = script do
+
+  vineyard <- allocateParty "Quinta Future Date Test"
+  ivdp <- allocateParty "IVDP Future Date Test"
+
+  setTime (time (date 2026 Oct 2) 0 0 0)
+
+  registryCid <- submit vineyard do
+    createCmd WineBatchRegistry with
+      vineyard = vineyard
+      ivdp = ivdp
+
+  submitMustFail vineyard do
+    exerciseCmd registryCid CreateWineBatch with
+      batchId = "PW-2026-0044"
+      origin = Origin with
+        region = "Douro Valley"
+        latitude = 41.162
+        longitude = -7.790
+      harvestDate = time (date 2026 Oct 10) 0 0 0
+      grapeVariety = "Touriga Nacional"
+      bottleQR = "QR-NFC-88424"
+
+
+-- Test 5: transfer custody from the vineyard to the winery
+testTransferCustody : Script ()
+testTransferCustody = script do
+
+  vineyard <- allocateParty "Quinta Transfer Test"
+  winery <- allocateParty "Sandeman Winery"
+  ivdp <- allocateParty "IVDP Transfer Test"
+
+  setTime (time (date 2026 Oct 2) 0 0 0)
+
+  registryCid <- submit vineyard do
+    createCmd WineBatchRegistry with
+      vineyard = vineyard
+      ivdp = ivdp
+
+  batchCid <- submit vineyard do
+    exerciseCmd registryCid CreateWineBatch with
+      batchId = "PW-2026-0050"
+      origin = Origin with
+        region = "Douro Valley"
+        latitude = 41.162
+        longitude = -7.790
+      harvestDate = time (date 2026 Sep 15) 0 0 0
+      grapeVariety = "Touriga Nacional"
+      bottleQR = "QR-NFC-88500"
+
+  newBatchCid <- submit vineyard do
+    exerciseCmd batchCid TransferCustody with
+      newOwner = winery
+      logisticsNote = None
+
+  Some transferredBatch <- queryContractId winery newBatchCid
+
+  assertMsg
+    "The new owner should be Sandeman Winery"
+    (transferredBatch.currentOwner == winery)
+
+  assertMsg
+    "The transfer should be recorded in the history"
+    (length transferredBatch.history == 1)
+
+  pure ()
+
+
+-- Test 6: transfer custody through the complete supply chain
+testMultipleCustodyTransfers : Script ()
+testMultipleCustodyTransfers = script do
+
+  vineyard <- allocateParty "Quinta Multi Transfer"
+  winery <- allocateParty "Sandeman Multi Transfer"
+  logistics <- allocateParty "LogisTrans"
+  retailer <- allocateParty "ViniShop Oslo"
+  ivdp <- allocateParty "IVDP Multi Transfer"
+
+  setTime (time (date 2026 Oct 2) 0 0 0)
+
+  registryCid <- submit vineyard do
+    createCmd WineBatchRegistry with
+      vineyard = vineyard
+      ivdp = ivdp
+
+  batchCid <- submit vineyard do
+    exerciseCmd registryCid CreateWineBatch with
+      batchId = "PW-2026-0051"
+      origin = Origin with
+        region = "Douro Valley"
+        latitude = 41.162
+        longitude = -7.790
+      harvestDate = time (date 2026 Sep 15) 0 0 0
+      grapeVariety = "Touriga Nacional"
+      bottleQR = "QR-NFC-88501"
+
+  -- Quinta -> Sandeman
+  wineryBatchCid <- submit vineyard do
+    exerciseCmd batchCid TransferCustody with
+      newOwner = winery
+      logisticsNote = None
+
+  -- Sandeman -> LogisTrans
+  logisticsBatchCid <- submit winery do
+    exerciseCmd wineryBatchCid TransferCustody with
+      newOwner = logistics
+      logisticsNote =
+        Some "Temperature 14-16C, Lisbon -> Oslo"
+
+  -- LogisTrans -> ViniShop Oslo
+  retailerBatchCid <- submit logistics do
+    exerciseCmd logisticsBatchCid TransferCustody with
+      newOwner = retailer
+      logisticsNote = None
+
+  Some finalBatch <- queryContractId retailer retailerBatchCid
+
+  assertMsg
+    "The final owner should be ViniShop Oslo"
+    (finalBatch.currentOwner == retailer)
+
+  assertMsg
+    "Three custody transfers should be recorded"
+    (length finalBatch.history == 3)
+
+  pure ()
+
+
+-- Test 7: reject a custody transfer by a party that is not the current owner
+testRejectUnauthorizedTransfer : Script ()
+testRejectUnauthorizedTransfer = script do
+
+  vineyard <- allocateParty "Quinta Unauthorized Test"
+  winery <- allocateParty "Sandeman Unauthorized Test"
+  intruder <- allocateParty "Unauthorized Party"
+  ivdp <- allocateParty "IVDP Unauthorized Test"
+
+  setTime (time (date 2026 Oct 2) 0 0 0)
+
+  registryCid <- submit vineyard do
+    createCmd WineBatchRegistry with
+      vineyard = vineyard
+      ivdp = ivdp
+
+  batchCid <- submit vineyard do
+    exerciseCmd registryCid CreateWineBatch with
+      batchId = "PW-2026-0052"
+      origin = Origin with
+        region = "Douro Valley"
+        latitude = 41.162
+        longitude = -7.790
+      harvestDate = time (date 2026 Sep 15) 0 0 0
+      grapeVariety = "Touriga Nacional"
+      bottleQR = "QR-NFC-88502"
+
+  submitMustFail intruder do
+    exerciseCmd batchCid TransferCustody with
+      newOwner = winery
+      logisticsNote = None
+
+
+-- Test 8: record a production event after the winery receives the batch
+testRecordProductionEvent : Script ()
+testRecordProductionEvent = script do
+
+  vineyard <- allocateParty "Quinta Production Test"
+  winery <- allocateParty "Sandeman Production Test"
+  ivdp <- allocateParty "IVDP Production Test"
+
+  setTime (time (date 2026 Oct 2) 0 0 0)
+
+  registryCid <- submit vineyard do
+    createCmd WineBatchRegistry with
+      vineyard = vineyard
+      ivdp = ivdp
+
+  batchCid <- submit vineyard do
+    exerciseCmd registryCid CreateWineBatch with
+      batchId = "PW-2026-0060"
+      origin = Origin with
+        region = "Douro Valley"
+        latitude = 41.162
+        longitude = -7.790
+      harvestDate = time (date 2026 Sep 15) 0 0 0
+      grapeVariety = "Touriga Nacional"
+      bottleQR = "QR-NFC-88600"
+
+  wineryBatchCid <- submit vineyard do
+    exerciseCmd batchCid TransferCustody with
+      newOwner = winery
+      logisticsNote = None
+
+  productionBatchCid <- submit winery do
+    exerciseCmd wineryBatchCid RecordProductionEvent with
+      productionDetails =
+        "Fermentation completed and aged for 18 months in oak barrels"
+
+  Some producedBatch <- queryContractId winery productionBatchCid
+
+  assertMsg
+    "The winery should remain the current owner"
+    (producedBatch.currentOwner == winery)
+
+  assertMsg
+    "The history should contain the transfer and production events"
+    (length producedBatch.history == 2)
+
+  pure ()
+
+-- Test 9: complete certification workflow
+testIssueCertification : Script ()
+testIssueCertification = script do
+
+  vineyard <- allocateParty "Quinta Certification Test"
+  winery <- allocateParty "Sandeman Certification Test"
+  ivdp <- allocateParty "IVDP Certification Test"
+
+  setTime (time (date 2026 Oct 2) 0 0 0)
+
+  -- Create the registry
+  registryCid <- submit vineyard do
+    createCmd WineBatchRegistry with
+      vineyard = vineyard
+      ivdp = ivdp
+
+  -- Create the wine batch
+  batchCid <- submit vineyard do
+    exerciseCmd registryCid CreateWineBatch with
+      batchId = "PW-2026-0070"
+      origin = Origin with
+        region = "Douro Valley"
+        latitude = 41.162
+        longitude = -7.790
+      harvestDate = time (date 2026 Sep 15) 0 0 0
+      grapeVariety = "Touriga Nacional"
+      bottleQR = "QR-NFC-88700"
+
+  -- Transfer custody to Sandeman Winery
+  wineryBatchCid <- submit vineyard do
+    exerciseCmd batchCid TransferCustody with
+      newOwner = winery
+      logisticsNote = None
+
+  -- Record production information
+  productionBatchCid <- submit winery do
+    exerciseCmd wineryBatchCid RecordProductionEvent with
+      productionDetails =
+        "Fermentation completed and aged for 18 months in oak barrels"
+
+  -- Request certification from the IVDP
+  requestedBatchCid <- submit winery do
+    exerciseCmd productionBatchCid RequestCertification
+
+  -- IVDP approves the batch
+  certifiedBatchCid <- submit ivdp do
+    exerciseCmd requestedBatchCid IssueCertification with
+      newCertificationHash =
+        "sha256-port-wine-certificate-0070"
+      newIpfsCid =
+        "bafybeigdyrzt-port-wine-certificate-0070"
+
+  -- Check the final certified batch
+  Some certifiedBatch <- queryContractId winery certifiedBatchCid
+
+  assertMsg
+    "The batch should be certified"
+    (certifiedBatch.status == CERTIFIED)
+
+  assertMsg
+    "The certification hash should be stored"
+    (certifiedBatch.certificationHash ==
+      Some "sha256-port-wine-certificate-0070")
+
+  assertMsg
+    "The IPFS CID should be stored"
+    (certifiedBatch.ipfsCid ==
+      Some "bafybeigdyrzt-port-wine-certificate-0070")
+
+  assertMsg
+    "The batch ID must remain unchanged"
+    (certifiedBatch.batchId == "PW-2026-0070")
+
+  assertMsg
+    "The history should contain four events"
+    (length certifiedBatch.history == 4)
+
+  pure ()
+
+-- Test 10: reject certification of a wine batch
+testRejectCertification : Script ()
+testRejectCertification = script do
+
+  vineyard <- allocateParty "Quinta Rejection Test"
+  winery <- allocateParty "Sandeman Rejection Test"
+  ivdp <- allocateParty "IVDP Rejection Test"
+
+  setTime (time (date 2026 Oct 2) 0 0 0)
+
+  registryCid <- submit vineyard do
+    createCmd WineBatchRegistry with
+      vineyard = vineyard
+      ivdp = ivdp
+
+  batchCid <- submit vineyard do
+    exerciseCmd registryCid CreateWineBatch with
+      batchId = "PW-2026-0071"
+      origin = Origin with
+        region = "Douro Valley"
+        latitude = 41.162
+        longitude = -7.790
+      harvestDate = time (date 2026 Sep 15) 0 0 0
+      grapeVariety = "Touriga Nacional"
+      bottleQR = "QR-NFC-88701"
+
+  wineryBatchCid <- submit vineyard do
+    exerciseCmd batchCid TransferCustody with
+      newOwner = winery
+      logisticsNote = None
+
+  productionBatchCid <- submit winery do
+    exerciseCmd wineryBatchCid RecordProductionEvent with
+      productionDetails =
+        "Fermentation completed and aged for 18 months in oak barrels"
+
+  requestedBatchCid <- submit winery do
+    exerciseCmd productionBatchCid RequestCertification
+
+  rejectedBatchCid <- submit ivdp do
+    exerciseCmd requestedBatchCid RejectCertification with
+      rejectionReason =
+        "Batch does not comply with IVDP certification requirements"
+
+  Some rejectedBatch <- queryContractId winery rejectedBatchCid
+
+  assertMsg
+    "The batch should be rejected"
+    (rejectedBatch.status == REJECTED)
+
+  assertMsg
+    "The batch ID must remain unchanged"
+    (rejectedBatch.batchId == "PW-2026-0071")
+
+  assertMsg
+    "The history should contain four events"
+    (length rejectedBatch.history == 4)
+
+  pure ()
+
+-- Test 11: consumer verifies a sanitized provenance summary by QR code
+testVerifyProvenance : Script ()
+testVerifyProvenance = script do
+
+  vineyard <- allocateParty "Quinta Provenance Test"
+  winery <- allocateParty "Sandeman Provenance Test"
+  retailer <- allocateParty "ViniShop Provenance Test"
+  ivdp <- allocateParty "IVDP Provenance Test"
+
+  setTime (time (date 2026 Oct 2) 0 0 0)
+
+  -- Create registry
+  registryCid <- submit vineyard do
+    createCmd WineBatchRegistry with
+      vineyard = vineyard
+      ivdp = ivdp
+
+  -- Create wine batch
+  batchCid <- submit vineyard do
+    exerciseCmd registryCid CreateWineBatch with
+      batchId = "PW-2026-0080"
+      origin = Origin with
+        region = "Douro Valley"
+        latitude = 41.162
+        longitude = -7.790
+      harvestDate = time (date 2026 Sep 15) 0 0 0
+      grapeVariety = "Touriga Nacional"
+      bottleQR = "QR-NFC-88800"
+
+  -- Transfer to winery
+  wineryBatchCid <- submit vineyard do
+    exerciseCmd batchCid TransferCustody with
+      newOwner = winery
+      logisticsNote = None
+
+  -- Add private production information
+  productionBatchCid <- submit winery do
+    exerciseCmd wineryBatchCid RecordProductionEvent with
+      productionDetails =
+        "Private fermentation notes and proprietary aging process"
+
+  -- Request certification
+  requestedBatchCid <- submit winery do
+    exerciseCmd productionBatchCid RequestCertification
+
+  -- IVDP certifies the batch
+  certifiedBatchCid <- submit ivdp do
+    exerciseCmd requestedBatchCid IssueCertification with
+      newCertificationHash =
+        "sha256-port-wine-certificate-0080"
+      newIpfsCid =
+        "bafybeigdyrzt-port-wine-certificate-0080"
+
+  -- Transfer to retailer with private logistics information
+  retailerBatchCid <- submit winery do
+    exerciseCmd certifiedBatchCid TransferCustody with
+      newOwner = retailer
+      logisticsNote =
+        Some "Private commercial and logistics information"
+
+  -- Scan the correct QR code
+  summary <- submit retailer do
+    exerciseCmd retailerBatchCid VerifyProvenance with
+      scannedQR = "QR-NFC-88800"
+
+  assertMsg
+    "The public summary should contain the correct batch ID"
+    (summary.batchId == "PW-2026-0080")
+
+  assertMsg
+    "The public summary should show the Douro Valley origin"
+    (summary.origin.region == "Douro Valley")
+
+  assertMsg
+    "The public summary should show a certified batch"
+    (summary.certificationStatus == CERTIFIED)
+
+  assertMsg
+    "The certification hash should be visible"
+    (summary.certificationHash ==
+      Some "sha256-port-wine-certificate-0080")
+
+  assertMsg
+    "Sensitive production events must not be visible"
+    (not
+      (any
+        (\event -> event.eventType == "PRODUCTION")
+        summary.publicHistory))
+
+  assertMsg
+    "The public history should contain four high-level events"
+    (length summary.publicHistory == 4)
+
+  -- Wrong QR code must fail
+  submitMustFail retailer do
+    exerciseCmd retailerBatchCid VerifyProvenance with
+      scannedQR = "WRONG-QR-CODE"
+
+  pure ()
+
+-- Test 12: recall a certified batch and block further custody transfers
+testRecallBatch : Script ()
+testRecallBatch = script do
+
+  vineyard <- allocateParty "Quinta Recall Test"
+  winery <- allocateParty "Sandeman Recall Test"
+  logistics <- allocateParty "LogisTrans Recall Test"
+  ivdp <- allocateParty "IVDP Recall Test"
+
+  setTime (time (date 2026 Oct 2) 0 0 0)
+
+  -- Create registry
+  registryCid <- submit vineyard do
+    createCmd WineBatchRegistry with
+      vineyard = vineyard
+      ivdp = ivdp
+
+  -- Create wine batch
+  batchCid <- submit vineyard do
+    exerciseCmd registryCid CreateWineBatch with
+      batchId = "PW-2026-0090"
+      origin = Origin with
+        region = "Douro Valley"
+        latitude = 41.162
+        longitude = -7.790
+      harvestDate = time (date 2026 Sep 15) 0 0 0
+      grapeVariety = "Touriga Nacional"
+      bottleQR = "QR-NFC-88900"
+
+  -- Transfer to winery
+  wineryBatchCid <- submit vineyard do
+    exerciseCmd batchCid TransferCustody with
+      newOwner = winery
+      logisticsNote = None
+
+  -- Request certification
+  requestedBatchCid <- submit winery do
+    exerciseCmd wineryBatchCid RequestCertification
+
+  -- IVDP certifies the batch
+  certifiedBatchCid <- submit ivdp do
+    exerciseCmd requestedBatchCid IssueCertification with
+      newCertificationHash =
+        "sha256-port-wine-certificate-0090"
+      newIpfsCid =
+        "bafybeigdyrzt-port-wine-certificate-0090"
+
+  -- IVDP recalls the certified batch
+  recalledBatchCid <- submit ivdp do
+    exerciseCmd certifiedBatchCid RecallBatch with
+      recallReason =
+        "Quality control issue detected after certification"
+
+  -- Check the recalled batch
+  Some recalledBatch <- queryContractId winery recalledBatchCid
+
+  assertMsg
+    "The batch should be recalled"
+    (recalledBatch.status == RECALLED)
+
+  assertMsg
+    "The batch ID must remain unchanged"
+    (recalledBatch.batchId == "PW-2026-0090")
+
+  assertMsg
+    "The recall should be recorded in the history"
+    (length recalledBatch.history == 4)
+
+  -- A recalled batch cannot be transferred
+  submitMustFail winery do
+    exerciseCmd recalledBatchCid TransferCustody with
+      newOwner = logistics
+      logisticsNote = None
+
+  pure ()
+
+-- Test 13: complete end-to-end Port wine traceability workflow
+testEndToEndWorkflow : Script ()
+testEndToEndWorkflow = script do
+
+  vineyard <- allocateParty "Quinta do Vale E2E"
+  winery <- allocateParty "Sandeman Winery E2E"
+  ivdp <- allocateParty "IVDP E2E"
+  logistics <- allocateParty "LogisTrans E2E"
+  retailer <- allocateParty "ViniShop Oslo E2E"
+
+  setTime (time (date 2026 Oct 2) 0 0 0)
+
+  -- Step 1: Quinta do Vale creates the wine batch
+  registryCid <- submit vineyard do
+    createCmd WineBatchRegistry with
+      vineyard = vineyard
+      ivdp = ivdp
+
+  batchCid <- submit vineyard do
+    exerciseCmd registryCid CreateWineBatch with
+      batchId = "PW-2026-0042"
+      origin = Origin with
+        region = "Douro Valley"
+        latitude = 41.162
+        longitude = -7.790
+      harvestDate = time (date 2026 Sep 15) 0 0 0
+      grapeVariety = "Touriga Nacional"
+      bottleQR = "QR-NFC-88421"
+
+  -- Step 2: Quinta do Vale transfers custody to Sandeman Winery
+  wineryBatchCid <- submit vineyard do
+    exerciseCmd batchCid TransferCustody with
+      newOwner = winery
+      logisticsNote = None
+
+  -- Step 3: Sandeman Winery records production information
+  productionBatchCid <- submit winery do
+    exerciseCmd wineryBatchCid RecordProductionEvent with
+      productionDetails =
+        "Fermentation completed and aged for 18 months in oak barrels"
+
+  -- Step 4: Sandeman Winery requests certification
+  requestedBatchCid <- submit winery do
+    exerciseCmd productionBatchCid RequestCertification
+
+  -- Step 5: IVDP certifies the wine batch
+  certifiedBatchCid <- submit ivdp do
+    exerciseCmd requestedBatchCid IssueCertification with
+      newCertificationHash =
+        "sha256-port-wine-certificate-PW-2026-0042"
+      newIpfsCid =
+        "bafybeigdyrzt-port-wine-certificate-PW-2026-0042"
+
+  -- Step 6: Sandeman Winery transfers the batch to LogisTrans
+  logisticsBatchCid <- submit winery do
+    exerciseCmd certifiedBatchCid TransferCustody with
+      newOwner = logistics
+      logisticsNote =
+        Some "Temperature controlled transport from Portugal to Norway"
+
+  -- Step 7: LogisTrans transfers the batch to ViniShop Oslo
+  retailerBatchCid <- submit logistics do
+    exerciseCmd logisticsBatchCid TransferCustody with
+      newOwner = retailer
+      logisticsNote = None
+
+  -- Verify the final private batch state
+  Some finalBatch <- queryContractId retailer retailerBatchCid
+
+  assertMsg
+    "The final owner should be ViniShop Oslo"
+    (finalBatch.currentOwner == retailer)
+
+  assertMsg
+    "The final batch should remain certified"
+    (finalBatch.status == CERTIFIED)
+
+  assertMsg
+    "The batch ID must remain unchanged throughout the workflow"
+    (finalBatch.batchId == "PW-2026-0042")
+
+  assertMsg
+    "The complete internal history should contain six events"
+    (length finalBatch.history == 6)
+
+  -- Step 8: the QR code is scanned and provenance is verified
+  summary <- submit retailer do
+    exerciseCmd retailerBatchCid VerifyProvenance with
+      scannedQR = "QR-NFC-88421"
+
+  assertMsg
+    "The provenance summary should contain the correct batch ID"
+    (summary.batchId == "PW-2026-0042")
+
+  assertMsg
+    "The provenance summary should show the Douro Valley origin"
+    (summary.origin.region == "Douro Valley")
+
+  assertMsg
+    "The provenance summary should show a certified batch"
+    (summary.certificationStatus == CERTIFIED)
+
+  assertMsg
+    "The certification hash should be publicly verifiable"
+    (summary.certificationHash ==
+      Some "sha256-port-wine-certificate-PW-2026-0042")
+
+  assertMsg
+    "The public history should contain five high-level events"
+    (length summary.publicHistory == 5)
+
+  assertMsg
+    "Sensitive production information must not appear publicly"
+    (not
+      (any
+        (\event -> event.eventType == "PRODUCTION")
+        summary.publicHistory))
+
+  pure ()
